@@ -13,6 +13,8 @@ const GENERATOR_ROOT = join(DIST_ROOT, 'generator');
 const BASELINE_SDK = join(DIST_ROOT, 'baseline-sdk');
 const BASELINE_TAR = join(DIST_ROOT, 'baseline-sdk.tar');
 const TYPESCRIPT_GENERATOR_VERSION = '3.80.1';
+const DEFAULT_ORGANIZATION = 'cloudflare';
+const JS_IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
 type OpenApiDoc = {
   paths?: Record<string, Record<string, unknown>>;
@@ -24,6 +26,9 @@ interface Args {
   openapi?: string;
   base?: string;
   out?: string;
+  organization: string;
+  namespace?: string;
+  clientName?: string;
   help: boolean;
 }
 
@@ -41,20 +46,34 @@ Usage:
 Options:
   --base <file.json>       Complete OpenAPI matching the pre-generated SDK
   --out <dir>              Required output directory
+  --organization <name>    Fern organization (default: ${DEFAULT_ORGANIZATION})
+  --namespace <name>       Exported namespace; also prefixes the client and error
+                           classes (default: <Organization>Api, e.g. CloudflareApi)
+  --client-name <name>     Root client class (default: <namespace>Client)
   -h, --help               Show this help
 `;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { help: false };
+  const args: Args = { organization: DEFAULT_ORGANIZATION, help: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === undefined || arg === '--') continue;
     const next = argv[i + 1];
-    if (arg === '--base' || arg === '--out' || arg === '--bundle') {
+    if (
+      arg === '--base' ||
+      arg === '--out' ||
+      arg === '--bundle' ||
+      arg === '--organization' ||
+      arg === '--namespace' ||
+      arg === '--client-name'
+    ) {
       if (next === undefined) throw new Error(`Missing value for ${arg}`);
       if (arg === '--base') args.base = next;
       else if (arg === '--out') args.out = next;
+      else if (arg === '--organization') args.organization = next;
+      else if (arg === '--namespace') args.namespace = next;
+      else if (arg === '--client-name') args.clientName = next;
       else args.openapi = next;
       i += 1;
     } else if (arg === '-h' || arg === '--help') {
@@ -67,7 +86,24 @@ function parseArgs(argv: string[]): Args {
       throw new Error(`Unexpected extra bundle argument: ${arg}`);
     }
   }
+  for (const [flag, value] of [
+    ['--namespace', args.namespace],
+    ['--client-name', args.clientName],
+  ] as const) {
+    if (value !== undefined && !JS_IDENTIFIER.test(value)) {
+      throw new Error(`${flag} must be a valid JavaScript identifier: ${value}`);
+    }
+  }
   return args;
+}
+
+// Fern TS `naming` config. Omitted when only the organization is set, so the
+// default Cloudflare workspace is unchanged.
+function fernNamingConfig(args: Args): string {
+  const naming: string[] = [];
+  if (args.namespace !== undefined) naming.push(`            namespace: ${args.namespace}\n`);
+  if (args.clientName !== undefined) naming.push(`            client: ${args.clientName}\n`);
+  return naming.length > 0 ? `          naming:\n${naming.join('')}` : '';
 }
 
 function readJson<T>(path: string): T {
@@ -111,13 +147,13 @@ function run(command: string, args: string[], cwd: string, env?: NodeJS.ProcessE
   execFileSync(command, args, { cwd, env: { ...process.env, ...env }, stdio: 'inherit' });
 }
 
-function writeFernWorkspace(root: string, generated: string, fernSpec: string): void {
+function writeFernWorkspace(root: string, generated: string, fernSpec: string, args: Args): void {
   const apiDir = join(root, 'fern/apis/api');
   mkdirSync(apiDir, { recursive: true });
-  writeJson(join(root, 'fern/fern.config.json'), { organization: 'cloudflare', version: '5.112.0' });
+  writeJson(join(root, 'fern/fern.config.json'), { organization: args.organization, version: '5.112.0' });
   writeFileSync(
     join(apiDir, 'generators.yml'),
-    `api:\n  specs:\n    - openapi: ../../../openapi.json\n      settings:\n        only-include-referenced-schemas: false\n        object-query-parameters: true\n        respect-nullable-schemas: true\n        coerce-enums-to-literals: true\n        path-parameter-order: url-order\n        resolve-schema-collisions: true\ndefault-group: typescript-sdk\ngroups:\n  typescript-sdk:\n    generators:\n      - name: fernapi/fern-typescript-sdk\n        version: ${TYPESCRIPT_GENERATOR_VERSION}\n        output:\n          location: local-file-system\n          path: ${JSON.stringify(generated)}\n        config:\n          allowCustomFetcher: true\n          formatter: oxfmt\n          linter: oxlint\n          skipResponseValidation: true\n          fetchSupport: native\n          formDataSupport: Node18\n          fileResponseType: binary-response\n          streamType: web\n          omitUndefined: true\n          offsetSemantics: page-index\n          maxRetries: 2\n          retryStatusCodes: recommended\n`,
+    `api:\n  specs:\n    - openapi: ../../../openapi.json\n      settings:\n        only-include-referenced-schemas: false\n        object-query-parameters: true\n        respect-nullable-schemas: true\n        coerce-enums-to-literals: true\n        path-parameter-order: url-order\n        resolve-schema-collisions: true\ndefault-group: typescript-sdk\ngroups:\n  typescript-sdk:\n    generators:\n      - name: fernapi/fern-typescript-sdk\n        version: ${TYPESCRIPT_GENERATOR_VERSION}\n        output:\n          location: local-file-system\n          path: ${JSON.stringify(generated)}\n        config:\n          allowCustomFetcher: true\n          formatter: oxfmt\n          linter: oxlint\n          skipResponseValidation: true\n          fetchSupport: native\n          formDataSupport: Node18\n          fileResponseType: binary-response\n          streamType: web\n          omitUndefined: true\n          offsetSemantics: page-index\n          maxRetries: 2\n          retryStatusCodes: recommended\n${fernNamingConfig(args)}`,
   );
   copyFileSync(fernSpec, join(root, 'openapi.json'));
 }
@@ -174,7 +210,7 @@ function main(): void {
     run('bash', [join(GENERATOR_ROOT, 'build-generator-image.sh'), 'typescript', TYPESCRIPT_GENERATOR_VERSION], work, {
       PKG_ROOT: DIST_ROOT,
     });
-    writeFernWorkspace(work, generated, fernSpec);
+    writeFernWorkspace(work, generated, fernSpec, args);
     const fernCli = requireFromHere.resolve('fern-api/cli.cjs');
     run('bash', [join(GENERATOR_ROOT, 'generate-fern-typescript-sharded.sh')], work, {
       FERN_TYPESCRIPT_GENERATOR_VERSION: TYPESCRIPT_GENERATOR_VERSION,
@@ -189,6 +225,7 @@ function main(): void {
       FORGE_SDK_GENERATED: generated,
       FORGE_SDK_SOURCE_SPEC: sourceSpec,
       FORGE_SDK_FERN_SPEC: fernSpec,
+      ...(args.clientName !== undefined && { FORGE_SDK_ROOT_CLIENT: args.clientName }),
     });
 
     rmSync(out, { recursive: true, force: true });

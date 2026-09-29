@@ -10,7 +10,7 @@
 //
 // The map is derived from the SAME generated source as the client, never
 // hand-written:
-//   - accessor chain  : walk CloudflareApiClient's `*Client` getters, resolving
+//   - accessor chain  : walk the root client's `*Client` getters, resolving
 //                        each `new XClient(...)` via the file's imports (so
 //                        duplicate class names across resources stay distinct).
 //   - method name      : the public endpoint method name.
@@ -36,6 +36,10 @@ import { findRequestParameter } from './sdk-map-ast.ts';
 const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const GENERATED = process.env['FORGE_SDK_GENERATED'] ?? join(PKG_ROOT, 'src', '_generated');
 const ROOT_CLIENT = join(GENERATED, 'Client.ts');
+// Root client class in Client.ts. Fern names it `<Namespace>Client` unless the
+// generator's `naming.client` overrides it; resource clients always end in
+// `Client`.
+const ROOT_CLIENT_NAME = process.env['FORGE_SDK_ROOT_CLIENT'];
 // The spec generate-sdk.ts installed for this run. Falls back to the repository
 // root, which is where that script resolves an uninstalled spec from.
 const FERN_SPEC = join(PKG_ROOT, '..', 'cloudflare-fern-config', 'fern', 'openapi.json');
@@ -124,7 +128,7 @@ function resolveImport(fromFile: string, spec: string): string | undefined {
   return existsSync(target) ? target : undefined;
 }
 
-// The trailing identifier of `CloudflareApi.Foo` or `Foo`.
+// The trailing identifier of `<Namespace>.Foo` or `Foo`.
 function lastName(name: ts.EntityName): string {
   return ts.isQualifiedName(name) ? name.right.text : name.text;
 }
@@ -138,7 +142,7 @@ function typeExpression(type: ts.TypeNode | undefined, source: ts.SourceFile): s
 }
 
 // The last type argument of a generic return type, e.g.
-// core.HttpResponsePromise<CloudflareApi.Foo> -> "Foo".
+// core.HttpResponsePromise<<Namespace>.Foo> -> "Foo".
 function returnTypeArgName(type: ts.TypeNode | undefined): string | undefined {
   if (!type || !ts.isTypeReferenceNode(type) || !type.typeArguments?.length) return undefined;
   return typeRefName(type.typeArguments[type.typeArguments.length - 1]);
@@ -256,11 +260,15 @@ function parseFile(file: string): ClassInfo {
     requestBodyProperties: new Map(),
   };
 
+  const expectedClass = file === ROOT_CLIENT && ROOT_CLIENT_NAME ? ROOT_CLIENT_NAME : undefined;
   const classDecl = source.statements.find(
-    (s): s is ts.ClassDeclaration => ts.isClassDeclaration(s) && !!s.name?.text.endsWith('Client'),
+    (s): s is ts.ClassDeclaration =>
+      ts.isClassDeclaration(s) && (expectedClass ? s.name?.text === expectedClass : !!s.name?.text.endsWith('Client')),
   );
   if (!classDecl) {
-    throw new Error(`generate-sdk-map: expected a *Client class in generated client file: ${file}`);
+    throw new Error(
+      `generate-sdk-map: expected a ${expectedClass ?? '*Client'} class in generated client file: ${file}`,
+    );
   }
 
   for (const member of classDecl.members) {
@@ -437,6 +445,27 @@ function preferEndpoint(a: Endpoint, b: Endpoint): Endpoint {
   return a.method.localeCompare(b.method) <= 0 ? a : b;
 }
 
+// The API namespace the generated index re-exports, e.g.
+// `export * as CloudflareApi from "./api/index.js"`. Fern derives it from the
+// organization or the `naming.namespace` config, and the request type
+// expressions copied from the client reference it.
+function apiNamespace(): string {
+  const source = ts.createSourceFile(GENERATED_INDEX, readFileSync(GENERATED_INDEX, 'utf8'), ts.ScriptTarget.Latest);
+  for (const statement of source.statements) {
+    if (
+      ts.isExportDeclaration(statement) &&
+      statement.exportClause &&
+      ts.isNamespaceExport(statement.exportClause) &&
+      statement.moduleSpecifier &&
+      ts.isStringLiteral(statement.moduleSpecifier) &&
+      /^\.\/api(?:\/index(?:\.js)?)?$/.test(statement.moduleSpecifier.text)
+    ) {
+      return statement.exportClause.name.text;
+    }
+  }
+  throw new Error(`generate-sdk-map: no \`export * as <Namespace> from "./api/index.js"\` in ${GENERATED_INDEX}`);
+}
+
 function emitOperationTypes(chosen: Map<string, Endpoint>): void {
   const operations = [...chosen.entries()]
     .filter((entry): entry is [string, Endpoint & { requestTypeExpression: string }] => {
@@ -445,7 +474,7 @@ function emitOperationTypes(chosen: Map<string, Endpoint>): void {
     .sort(([a], [b]) => a.localeCompare(b));
   const queryOperations = operations.filter(([, endpoint]) => (endpoint.queryProperties?.length ?? 0) > 0);
   const lines = [
-    "import type { CloudflareApi } from './index.js';",
+    `import type { ${apiNamespace()} } from './index.js';`,
     '',
     '/** Request types keyed by the OpenAPI operationId used to generate them. */',
     'export interface SdkOperationRequestMap {',
