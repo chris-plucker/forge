@@ -54,28 +54,35 @@ if (existsSync(join(BASELINE_SDK, 'index.ts')) && existsSync(join(BASELINE_SDK, 
 
 const spec = join(REPO_ROOT, 'packages', 'cloudflare-fern-config', 'fern', 'openapi.json');
 const metadataSpec = join(REPO_ROOT, 'openapi.json');
-const openapi = JSON.parse(readFileSync(spec, 'utf8')) as OpenApiDocument;
-const metadata = JSON.parse(readFileSync(metadataSpec, 'utf8')) as OpenApiDocument;
-const metadataByOperationId = new Map<string, Record<string, unknown>>();
-for (const pathItem of Object.values(metadata.paths ?? {})) {
-  for (const operation of Object.values(pathItem)) {
-    if (operation?.operationId) metadataByOperationId.set(operation.operationId, operation);
+const missingSpecs = [spec, metadataSpec].filter((path) => !existsSync(path));
+if (missingSpecs.length === 0) {
+  const openapi = JSON.parse(readFileSync(spec, 'utf8')) as OpenApiDocument;
+  const metadata = JSON.parse(readFileSync(metadataSpec, 'utf8')) as OpenApiDocument;
+  const metadataByOperationId = new Map<string, Record<string, unknown>>();
+  for (const pathItem of Object.values(metadata.paths ?? {})) {
+    for (const operation of Object.values(pathItem)) {
+      if (operation?.operationId) metadataByOperationId.set(operation.operationId, operation);
+    }
   }
-}
-for (const pathItem of Object.values(openapi.paths ?? {})) {
-  for (const operation of Object.values(pathItem)) {
-    if (!operation?.operationId) continue;
-    const source = metadataByOperationId.get(operation.operationId);
-    if (!source) continue;
-    for (const [key, value] of Object.entries(source)) {
-      if ((key.startsWith('x-fern-') || key.startsWith('x-forge-')) && operation[key] === undefined) {
-        operation[key] = value;
+  for (const pathItem of Object.values(openapi.paths ?? {})) {
+    for (const operation of Object.values(pathItem)) {
+      if (!operation?.operationId) continue;
+      const source = metadataByOperationId.get(operation.operationId);
+      if (!source) continue;
+      for (const [key, value] of Object.entries(source)) {
+        if ((key.startsWith('x-fern-') || key.startsWith('x-forge-')) && operation[key] === undefined) {
+          operation[key] = value;
+        }
       }
     }
   }
+  writeFileSync(join(DIST, 'openapi.json'), `${JSON.stringify(openapi, null, 2)}\n`);
+  console.log(`==> Packaged OpenAPI spec from ${spec} with metadata from ${metadataSpec}`);
+} else {
+  // The bundled spec is only a convenience copy. Generating from a positional
+  // OpenAPI does not read it.
+  console.log(`note: OpenAPI spec not found at ${missingSpecs.join(', ')}; skipping openapi.json packaging`);
 }
-writeFileSync(join(DIST, 'openapi.json'), `${JSON.stringify(openapi, null, 2)}\n`);
-console.log(`==> Packaged OpenAPI spec from ${spec} with metadata from ${metadataSpec}`);
 
 cpSync(
   join(REPO_ROOT, 'packages', 'cloudflare-forge-sdk-ts', 'scripts', 'fern-typescript-entrypoint.sh'),
