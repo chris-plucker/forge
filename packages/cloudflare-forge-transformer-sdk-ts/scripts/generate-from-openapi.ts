@@ -24,6 +24,7 @@ interface Args {
   openapi?: string;
   base?: string;
   out?: string;
+  cloudflareEnvelope: boolean;
   help: boolean;
 }
 
@@ -41,12 +42,14 @@ Usage:
 Options:
   --base <file.json>       Complete OpenAPI matching the pre-generated SDK
   --out <dir>              Required output directory
+  --no-cloudflare-envelope Do not install the runtime that unwraps Cloudflare's
+                           { success, errors, messages, result } response envelope
   -h, --help               Show this help
 `;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { help: false };
+  const args: Args = { cloudflareEnvelope: true, help: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === undefined || arg === '--') continue;
@@ -57,6 +60,8 @@ function parseArgs(argv: string[]): Args {
       else if (arg === '--out') args.out = next;
       else args.openapi = next;
       i += 1;
+    } else if (arg === '--no-cloudflare-envelope') {
+      args.cloudflareEnvelope = false;
     } else if (arg === '-h' || arg === '--help') {
       args.help = true;
     } else if (arg.startsWith('-') && arg !== '-') {
@@ -122,6 +127,8 @@ function writeFernWorkspace(root: string, generated: string, fernSpec: string): 
   copyFileSync(fernSpec, join(root, 'openapi.json'));
 }
 
+// Overlays Fern's getResponseBody with one that unwraps Cloudflare's success
+// envelope. Without it the generated SDK keeps Fern's stock fetcher.
 function installCustomRuntime(generated: string): void {
   cpSync(join(GENERATOR_ROOT, 'custom'), generated, { recursive: true });
 }
@@ -184,7 +191,7 @@ function main(): void {
       FERN_TYPESCRIPT_FERN_CLI_SCRIPT: fernCli,
       FERN_TYPESCRIPT_INSTALL_CUSTOM_RUNTIME: '0',
     });
-    installCustomRuntime(generated);
+    if (args.cloudflareEnvelope) installCustomRuntime(generated);
     run(process.execPath, [join(GENERATOR_ROOT, 'generate-sdk-map.js')], work, {
       FORGE_SDK_GENERATED: generated,
       FORGE_SDK_SOURCE_SPEC: sourceSpec,
