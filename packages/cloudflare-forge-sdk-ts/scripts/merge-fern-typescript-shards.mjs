@@ -87,14 +87,19 @@ for (const resource of [...resources.keys()].sort((a, b) => a.localeCompare(b)))
     ...[...resources.get(resource)].sort((a, b) => rankResourceExport(a) - rankResourceExport(b) || a.localeCompare(b)),
   );
 }
-await writeFile(join(outputDir, resourceIndexPath), `${resourceLines.join('\n')}\n`);
+// Specs without tags put every endpoint on the root client, so Fern emits no
+// resources/ directory and there is no barrel to rebuild.
+if (resources.size > 0) {
+  await writeFile(join(outputDir, resourceIndexPath), `${resourceLines.join('\n')}\n`);
+}
 
 // The remaining Fern root/core barrels are also distributed across shards.
 // Preserve first-seen Fern order while retaining every unique export.
 for (const aggregatePath of allowedAggregateConflicts) {
-  if (aggregatePath === resourceIndexPath) continue;
+  const variants = aggregateVariants.get(aggregatePath);
+  if (aggregatePath === resourceIndexPath || !variants) continue;
   const lines = new Set();
-  for (const source of aggregateVariants.get(aggregatePath) ?? []) {
+  for (const source of variants) {
     for (const line of source.trim().split('\n')) {
       if (!line) continue;
       if (!line.startsWith('export ')) {
